@@ -1,5 +1,5 @@
 LEN_THRESHOLD = 10
-
+import numpy as np
 
 def read_files(data_dir):
     with open(data_dir + 'pos_pos', 'r') as f:
@@ -103,12 +103,34 @@ def get_data(main_task, data_dir):
     pos_pos, pos_neg, neg_pos, neg_neg = read_files(data_dir)
 
     if 'unbalanced' in main_task:
-        return get_unbalanced(main_task, pos_pos, pos_neg, neg_pos, neg_neg)
+        x_train, x_test = get_unbalanced(main_task, pos_pos, pos_neg, neg_pos, neg_neg)
     elif 'age' in main_task or 'mention2' in main_task:
-        return get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, 42500, 40000)
+        x_train, x_test = get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, 42500, 40000)
     else:
-        return get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, total, train_s)
+        x_train, x_test = get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, total, train_s)
+
+    print('training set size: {} and test set size: {}'.format(len(x_train), len(x_test)))
+    train_data = AdvDemogTextData(x_train)
+    test_data = AdvDemogTextData(x_test)
+
+    return train_data, test_data
 
 
+import torch
+import torch.nn as nn
+import torch.utils.data as data
 
+class AdvDemogTextData(data.Dataset):
+    def __init__(self, x_data):
+        self.data = x_data
 
+    def __getitem__(self, index):
+        sample = self.data[index]
+        sentence = torch.Tensor(self.data[0]).int()
+        y_task = torch.Tensor(self.data[1]).int()
+        y_adv = torch.Tensor(self.data[2])
+
+        return sentence, y_task, y_adv
+
+    def __len__(self):
+        return len(self.data)

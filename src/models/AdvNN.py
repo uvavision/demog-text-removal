@@ -1,94 +1,95 @@
-import dynet as dy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import torchvision.models as models
+import torch.nn.utils
+from torch.autograd import Function
+
 import numpy as np
 
 
-class AdvNN(object):
-    def __init__(self, task_in_size, task_hid_size, task_out_size, adv_in_size, adv_hid_size, adv_out_size, adv_count,
-                 vocab_size, dropout, lstm_size, adv_depth=1, rnn_dropout=0.0, rnn_type='lstm'):
-        model = dy.Model()
+class AdvNN(nn.Module):
+    def __init__(self, task_in_size, task_hid_size, task_out_size, adv_in_size, adv_hid_size, \
+            adv_out_size, adv_count, vocab_size, dropout, lstm_size, adv_depth=1, \
+            rnn_dropout=0.0, rnn_type='lstm'):
+        super(AdvNN, self).__init__()
 
         if rnn_type == 'lstm':
-            self._rnn = dy.LSTMBuilder(lstm_size, 300, task_in_size, model)
+            self._rnn = nn.LSTM(input_size=task_in_size, hidden_size=task_hid_size, num_layers=lstm_size, \
+                    bias=True, batch_first=True, dropout=rnn_dropout, bidirectional=False)
         elif rnn_type == 'gru':
-            self._rnn = dy.GRUBuilder(lstm_size, 300, task_in_size, model)
+            self._rnn = nn.GRU(input_size=task_in_size, hidden_size=task_hid_size, num_layers=lstm_size, \
+                    bias=True, batch_first=True, dropout=rnn_dropout, bidirectional=False)
         else:
-            self._rnn = dy.SimpleRNNBuilder(lstm_size, 300, task_in_size, model)
+            self._rnn = nn.RNN(input_size=task_in_size, hidden_size=task_hid_size, num_layers=lstm_size, \
+                    nonlinearity='tanh', bias=True, batch_first=True, dropout=rnn_dropout, bidirectional=False)
 
-        params = {}
+        self.encoder = nn.Embedding(vocab_size, task_in_size)
 
-        params['w_lookup'] = model.add_lookup_parameters((vocab_size, 300))
+        task = []
+        task.append(nn.Linear(task_in_size, task_hid_size, bias=True))
+        task.append(nn.Dropout(p=Dropout))
+        task.append(nn.Tanh())
+        task.append(nn.Linear(task_hid_size, task_out_size, bias=True))
+        self.task = nn.Sequential(*task)
 
-        in_task = task_in_size
-        params["task_w1"] = model.add_parameters((task_hid_size, in_task))
-        params["task_b1"] = model.add_parameters((task_hid_size))
-        params["task_w2"] = model.add_parameters((task_out_size, task_hid_size))
-        params["task_b2"] = model.add_parameters((task_out_size))
-
+        self.advs = []
         for i in range(adv_count):
+            adv = []
             for j in range(adv_depth):
-                params["adv_" + str(i) + "_w" + str(j + 1)] = model.add_parameters((adv_hid_size, adv_in_size))
-                params["adv_" + str(i) + "_b" + str(j + 1)] = model.add_parameters((adv_hid_size))
-            params["adv_" + str(i) + "_w" + str(adv_depth + 1)] = model.add_parameters((adv_out_size, adv_hid_size))
-            params["adv_" + str(i) + "_b" + str(adv_depth + 1)] = model.add_parameters((adv_out_size))
+                adv.append(nn.Linear(adv_in_size, adv_hid_size, bias=True))
+                adv.append(nn.Dropout(p=dropout))
+                adv.append(nn.Tanh())
+            adv.append(nn.Linear(adv_hid_size, adv_out_size, bias=True))
+            self.advs.append(nn.Sequential(*adv))
 
-        params["contra_adv_w1"] = model.add_parameters((adv_hid_size, adv_in_size))
-        params["contra_adv_b1"] = model.add_parameters((adv_hid_size))
-        params["contra_adv_w2"] = model.add_parameters((adv_out_size, adv_hid_size))
-        params["contra_adv_b2"] = model.add_parameters((adv_out_size))
 
-        self._model = model
         self._hid_dim = task_hid_size
         self._in_dim = task_in_size
         self._adv_count = adv_count
         self._adv_depth = adv_depth
-        self._params = params
-        self._dropout = dropout
-        self._rnn_dropout = rnn_dropout
+        self._dropout = nn.Dropout(p=dropout)
+        self._rnn_dropout =nn.Dropout(p=rnn_dropout)
+        self._rnn_type = rnn_type
+        self._rnn_layers = lstm_size
 
-    def encode_sentence(self, sentence, update_w=True, train=False):
+
+    def init_hidden(self, batch_size=32):
+        weight = next(self.parameters())
+        if self._rnn_type == 'lstm':
+            return (weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim), \
+                    weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim))
+        else:
+            return weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim)
+
+    def encode_sentence(self, sentence, hidden, train=False):
         """
         simple rnn encoder.
         each token gets embedded, and calculating the rnn over all of them.
         returning the final hidden state
         """
-        w_lookup = self._params['w_lookup']
-        words = [dy.lookup(w_lookup, w, update=update_w) for w in sentence]
-
-        rnn = self._rnn
+        emb_words = self.encoder(sentence)
 
         if train:
-            rnn.set_dropout(self._rnn_dropout)
+            self._rnn.train() # activate dropout duirng training
         else:
-            rnn.disable_dropout()
-        rnn_init = rnn.initial_state()
-        states = rnn_init.transduce(words)
-        return states[-1]
+            self._rnn.eval() # freeze dropout during testing
 
-    def task_mlp(self, vec_sen, train, y_s=None):
+        output, hidden = self._rnn(emb_words, hidden)
+        return hidden
+
+    def task_mlp(self, vec_sen, train):
         """
         calculating the mlp function over the sentence representation vector
         """
-        w1 = dy.parameter(self._params["task_w1"])
-        b1 = dy.parameter(self._params["task_b1"])
-        w2 = dy.parameter(self._params["task_w2"])
-        b2 = dy.parameter(self._params["task_b2"])
 
         if train:
-            drop = self._dropout
+            self.task.train()
         else:
-            drop = 0
+            self.task.eval()
 
-        if y_s is not None:
-            v = dy.vecInput(1)
-            v.set([y_s])
-            in_vec = dy.concatenate([vec_sen, v])
-        else:
-            in_vec = vec_sen
-
-        out = dy.tanh(dy.dropout(dy.affine_transform([b1, w1, in_vec]), drop))
-        out = dy.affine_transform([b2, w2, out])
-
-        return out
+        return self.task(vec_sen)
 
     def adv_mlp(self, vec_sen, adv_ind, train, vec_drop):
         """
@@ -96,53 +97,54 @@ class AdvNN(object):
         more than a single adversarial mlp is supported
         """
 
+        out = vec_sen
+        adv = self.advs[adv_ind]
         if train:
-            drop = self._dropout
-            out = dy.dropout(vec_sen, vec_drop)
+            if vec_drop > 0:
+                vec_drop = nn.Dropout(p=vec_drop)
+                out = vec_drop(vec_sen)
+            adv.train()
         else:
-            drop = 0
-            out = vec_sen
+            adv.eval()
 
-        for i in range(self._adv_depth):
-            w = dy.parameter(self._params["adv_" + str(adv_ind) + "_w" + str(i + 1)])
-            b = dy.parameter(self._params["adv_" + str(adv_ind) + "_b" + str(i + 1)])
-            out = dy.tanh(dy.dropout(dy.affine_transform([b, w, out]), drop))
-
-        w = dy.parameter(self._params["adv_" + str(adv_ind) + "_w" + str(self._adv_depth + 1)])
-        b = dy.parameter(self._params["adv_" + str(adv_ind) + "_b" + str(self._adv_depth + 1)])
-        out = dy.affine_transform([b, w, out])
-
-        return out
+        return adv(out)
 
     # based on: Unsupervised Domain Adaptation by Backpropagation, Yaroslav Ganin & Victor Lempitsky
-    def calc_loss(self, sentence, y_task, y_adv, train, ro, vec_drop=0):
+    def calc_loss(self, sentence, y_task, y_adv, train, ro, batch_size, vec_drop=0):
         """
         calculating the loss over a single example.
         accumulating the main task and adversarial task loss together.
         """
-        sen = self.encode_sentence(sentence, update_w=True, train=train)
+        hidden = self.init_hidden(batch_size)
+        sen = self.encode_sentence(sentence, train=train)
 
         task_res = self.task_mlp(sen, train)
-        task_probs = dy.softmax(task_res)
-        task_loss = dy.pickneglogsoftmax(task_res, y_task)
+        task_probs = F.softmax(task_res)
+        task_loss = F.nll_loss(task_res, y_task, reduction='sum')
 
         adversarial_res = []
         if ro > 0:
             adversarial_losses = []
 
             for i in range(self._adv_count):
-                adv_res = self.adv_mlp(dy.flip_gradient(sen, ro), i, train, vec_drop)
-                probs = dy.softmax(adv_res)
-                adversarial_res.append(np.argmax(probs.npvalue()))
-                adversarial_losses.append(dy.pickneglogsoftmax(adv_res, y_adv))
+                reversed_sen = ReverseLayerF.apply(sen, ro)
+                adv_res = self.adv_mlp(reversed_sen, i, train, vec_drop)
+                probs = F.softmax(adv_res)
+                adversarial_res.append(np.argmax(probs.data.numpy()))
+                adversarial_losses.append(F.nll_loss(adv_res, y_adv, reduction='sum'))
 
-            total_loss = task_loss + dy.esum(adversarial_losses)
+            adversarial_loss_sum = adversarial_losses[0]
+            if self._adv_count > 1:
+                for i in range(1, self._adv_count):
+                    adversarial_loss_sum += adversarial_losses[i]
+
+            total_loss = task_loss + adversarial_loss_sum
         else:
             total_loss = task_loss
 
-        return total_loss, np.argmax(task_probs.npvalue()), adversarial_res
+        return total_loss, np.argmax(task_probs.data.numpy()), adversarial_res
 
-    def adv_loss(self, sentence, y_adv, train):
+    def adv_loss(self, sentence, y_adv, train, batch_size):
         """
         calculating the loss for just a single class. mainly for the baseline models.
         :param sentence:
@@ -150,14 +152,27 @@ class AdvNN(object):
         :param train:
         :return:
         """
-        sen = self.encode_sentence(sentence, update_w=True, train=train)
+        hidden = self.init_hidden(batch_size)
+        sen = self.encode_sentence(sentence, train=train)
         adv_res = self.adv_mlp(sen, 0, train, 0)
-        adv_probs = dy.softmax(adv_res)
-        adv_loss = dy.pickneglogsoftmax(adv_res, y_adv)
-        return adv_loss, np.argmax((adv_probs.npvalue()))
+        adv_probs = F.softmax(adv_res)
+        adv_loss = F.nll_loss(adv_res, y_adv, reduction='sum')
+        return adv_loss, np.argmax((adv_probs.dtaat.numpy()))
 
-    def save(self, f_name):
-        self._model.save(f_name)
+    #def save(self, f_name):
+    #    self._model.save(f_name)
 
-    def load(self, f_name):
-        self._model.populate(f_name)
+    #def load(self, f_name):
+    #    self._model.populate(f_name)
+
+class ReverseLayerF(Function):
+
+    @staticmethod
+    def forward(cts, x, alpha):
+        ctx.alpha = alpha
+
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha

@@ -1,6 +1,6 @@
 """
 Usage:
-  sent_demog_attacker.py [--dynet-mem=MEM] [--dynet-seed=SEED] [--dynet-autobatch=NUM] [--dynet-gpus=NUM]
+  sent_demog_attacker.y [--batch_size=NUM]
   [--epochs=EPOCHS] [--ro=RO] [--model=MODEL] [--task=TASK] [--num_adv=NUM_ADV] [--adv_depth=NUM_HID_LAY]
   [--use_s] [--mlp_layers=NUM_LAY] [--vec_drop=DROPOUT] [--lr=LR]
   [--lstm_size=LSTM_SIZE] [--dropout=DROPOUT] [--enc_size=ENC_SIZE] [--rnn_type=RNN_TYPE] [--data=DATA]
@@ -10,10 +10,7 @@ Usage:
 
 Options:
   -h --help                     show this help message and exit
-  --dynet-mem=MEM               allocates MEM bytes for dynet
-  --dynet-seed=SEED             dynet random seed
-  --dynet-autobatch=NUM         autobatch for dynet
-  --dynet-gpus=NUM              use gpu
+  --batch_size=NUM              batch size
   --epochs=EPOCHS               amount of training epochs [default: 100]
   --ro=RO                       amount of power to the adversarial
   --model=MODEL                 model name
@@ -38,8 +35,20 @@ Options:
 """
 import os
 
-import dynet as dy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+from torch.autograd import Variable
+
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+from torchvision.utils import save_image
+from torch.utils.data import DataLoader
+
 import numpy as np
+import shutil
 from docopt import docopt
 from sklearn.metrics import accuracy_score
 from tensorboard_logger import configure, log_value
@@ -52,41 +61,38 @@ from training_utils import get_logger, task_dic
 from consts import SEED, models_dir, tensorboard_dir, data_dir
 
 np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
 
+def epoch_pass(data_loader, model, enc_net, optimizer, training, batch_size, vec_drop, truth_ind, \
+        logger, print_every=20000):
 
-def epoch_pass(data, model, trainer, training, batch_size, vec_drop, truth_ind, logger, print_every=20000):
-    dy.renew_cg()
     t_loss = 0.0
     preds, truth = [], []
+    n_processed = 0
 
-    losses = []
     for ind, row in enumerate(data):
+        sent = enc_net.encode_sentence(row[0].cuda(), train=False)
+        loss, adv_pred = model.calc_loss(sent, row[truth_ind], vec_drop, train=training)
+        preds.append(adv_pred.cpu().numpy())
+        truth.append(row[truth_ind].numpy())
 
-        loss, adv_pred = model.calc_loss(dy.inputTensor(row[0]), row[truth_ind], vec_drop, train=training)
-        preds.append(adv_pred)
-        truth.append(row[truth_ind])
+        if training:
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        losses.append(loss)
-
-        if len(losses) == batch_size or ind == len(row) - 1:
-            loss = dy.esum(losses)
-
-            if training:
-                loss.forward()
-                loss.backward()
-                trainer.update()
-
-            t_loss += loss.npvalue()
-            losses = []
-            dy.renew_cg()
+        t_loss += loss.item()
+        n_processed += len(row)
 
         if (ind + 1) % print_every == 0:
-            logger.debug('{0}: task loss: {1}, adv acc: {2}'.format((ind + 1) / print_every, t_loss[0] / (ind + 1),
-                                                                    accuracy_score(truth, preds)))
-    return accuracy_score(truth, preds), t_loss[0] / len(data)
+            logger.debug('{0}: task loss: {1}, adv acc: {2}'.format(ind + 1, t_loss / n_processed, \
+                    accuracy_score(truth, preds)))
+    return accuracy_score(truth, preds), t_loss / n_processed
 
 
-def train(model, train, dev, trainer, epochs, vec_drop, batch_size, logger, truth_ind=2, print_every=20000):
+def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, batch_size, \
+        logger, truth_ind=2, print_every=20000):
     """
     training method
     :param model: attacker model
@@ -108,26 +114,29 @@ def train(model, train, dev, trainer, epochs, vec_drop, batch_size, logger, trut
 
     logger.debug('training started')
     for epoch in xrange(1, epochs + 1):
-        dy.renew_cg()
 
         # train
-        epoch_pass(train, model, trainer, True, batch_size, vec_drop, truth_ind, logger, print_every)
-        train_task_acc, loss = epoch_pass(train, model, trainer, False, batch_size, vec_drop, truth_ind, logger, print_every)
+        epoch_pass(train_loader, model, enc_net, optimizer, True, batch_size, vec_drop, truth_ind, \
+                logger, print_every)
+        train_task_acc, loss = epoch_pass(train_loader, model, enc_net, optimizer, False, batch_size, \
+                vec_drop, truth_ind, logger, print_every)
         train_acc_arr.append(train_task_acc)
         train_loss_arr.append(loss)
         logger.debug('train, {0}, adv acc: {1}'.format(epoch, train_task_acc))
 
         # dev
-        dev_task_acc, loss = epoch_pass(dev, model, trainer, False, batch_size, vec_drop, truth_ind, logger, print_every)
+        dev_task_acc, loss = epoch_pass(dev_loader, model, enc_net, optimizer, False, batch_size, \
+                vec_drop, truth_ind, logger, print_every)
         dev_acc_arr.append(dev_task_acc)
         dev_loss_arr.append(loss)
 
         logger.debug('dev, {0}, adv acc: {1}'.format(epoch, dev_task_acc))
         log_value('attacker-acc', dev_task_acc, epoch)
+
         if dev_task_acc > best_score:
             best_score = dev_task_acc
             best_model_epoch = epoch
-            model.save(models_dir + task + '/best_attacker')
+            torch.save(model.state_dict(), models_dir + task + '/best_attacker')
     logger.info('best_score:' + str(best_score))
     logger.info('best_epoch:' + str(best_model_epoch))
     logger.info('train_task_acc:' + str(train_acc_arr))
@@ -145,8 +154,7 @@ def text2vectors(enc_model, data):
     """
     data_vectors = []
     for ind, row in enumerate(data):
-        dy.renew_cg()
-        sent = enc_model.encode_sentence(row[0], update_w=False, train=False)
+        sent = enc_model.encode_sentence(row[0], train=False)
         data_vectors.append((sent.npvalue(), row[1], row[2]))
     return data_vectors
 
@@ -158,6 +166,7 @@ if __name__ == '__main__':
     num_adv = int(arguments['--num_adv'])
     base_model = arguments['--model']
     task = 'attacker-' + base_model
+    batch_size = int(arguments['--batch_size'])
 
     if 'unseen' in task_str:
         task += '-data:' + task_str
@@ -219,9 +228,9 @@ if __name__ == '__main__':
     logger.info(task)
 
     configure(tensorboard_dir + task)
-    x_train, x_test = get_data(task_str, input_dir)
-
-    np.random.shuffle(x_train)
+    train_data, test_data = get_data(task_str, input_dir)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, num_workers=4)
 
     with open(input_vocab, 'r') as f:
         vocab = f.readlines()
@@ -229,19 +238,21 @@ if __name__ == '__main__':
     vocab_size = len(vocab)
     enc_net = AdvNN(hid_size, hid_size, 2, hid_size, adv_hid_size, 2, num_adv, vocab_size, dropout,
                     lstm_size, adv_depth, rnn_type=arguments['--rnn_type'])
+    enc_net = nn.DataParallel(enc_net).cuda()
+    checkpoint = torch.load(models_dir + attacked_model)
+    enc_net.load_state_dict(checkpoint['state_dict'])
 
-    enc_net.load(models_dir + attacked_model)
     if arguments['--model_flip'] != '0':
         encoder2 = AdvNN(hid_size, hid_size, 2, hid_size, adv_hid_size, 2, 5, vocab_size, dropout,
                          lstm_size, adv_depth)
         encoder2.load(models_dir + 'sent_race-n_adv:5-ro:1.0/epoch_50')
         if arguments['--model_flip'] == 'emb':
-            enc_net._params['w_lookup'] = encoder2._params['w_lookup']
+            enc_net.encoder = encoder2.encoder
         else:
             enc_net._rnn = encoder2._rnn
 
-    x_train = text2vectors(enc_net, x_train)
-    x_test = text2vectors(enc_net, x_test)
+    # x_train = text2vectors(enc_net, x_train)
+    # x_test = text2vectors(enc_net, x_test)
 
     mlp = []
     for i in range(mlp_lay - 1):
@@ -256,12 +267,12 @@ if __name__ == '__main__':
     if 'fix' in task or 'length' in task:
         lr = 0.001
 
-    trainer = dy.MomentumSGDTrainer(adv_net._model, lr)
+    optimizer = optim.SGD(adv_net.parameters(), lr=lr, momentum=0.9)
 
-    batch = 32
     if arguments['--main_task']:
         m_task = 1
     else:
 
         m_task = 2
-    train(adv_net, x_train, x_test, trainer, int(arguments['--epochs']), vec_drop, batch, logger, m_task)
+    train(adv_net, enc_net, train_loader, test_loader, optimizer, int(arguments['--epochs']), \
+            vec_drop, batch_size, logger, m_task)

@@ -8,13 +8,14 @@ from codecs import open
 import pandas as pd
 import tweepy
 from tqdm import tqdm
+import pdb
 
-consumer_key = 'YOUR_KEY_HERE'
-consumer_secret = 'YOUR_KEY_HERE'
-access_token = 'YOUR_KEY_HERE'
-access_token_secret = 'YOUR_KEY_HERE'
-project = 'PATH/TO/PROJECT'
-age_dir = project + 'data/raw/pan16-author-profiling-training-dataset-2016-04-25/pan16-author-profiling-training' \
+consumer_key = 'Pg4RjvIh3wpwUdCUBSlKttFWy'
+consumer_secret = 'kad3sU9KOwtOeWCYa02FsZc6BLAxIu0tPn0K9sEM7fYfQyFEUz'
+access_token = '3433619943-f2QpTIWnZIRUvQ6HyNlEql0Uw8l4qZpUY5GzL5Y'
+access_token_secret = '73lj0KTSrj2QJqeUVrblGc0SytOQDBzOpxpwhQDd1U49J'
+project = '/zf15/tw8cb/PhD/visual_gender_bias/demog-text-removal/'
+age_dir = '/localtmp/demog'+ '/pan16-author-profiling-training-dataset-2016-04-25/pan16-author-profiling-training' \
                     '-dataset-english-2016-04-25/'
 
 auth = tweepy.OAuthHandler(consumer_key, consumer_secret)

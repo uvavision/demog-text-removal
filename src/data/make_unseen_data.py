@@ -3,7 +3,7 @@ import sys
 import sklearn.utils
 from tqdm import tqdm
 
-project = 'PATH/TO/PROJECT'
+project = '/zf15/tw8cb/PhD/visual_gender_bias/demog-text-removal'
 sys.path.insert(0, project + '/src/models')
 
 from data_utils import get_data, CONF_LEVEL, normalize_text, to_file
@@ -13,20 +13,20 @@ from data_handler import read_files
 SEED = 16
 
 
-df = get_data(project + '/path/to/downloaded/twitteraae_all')
+df = get_data('/localtmp/demog/TwitterAAE-full-v1/twitteraae_all')
 
 emotions = happy + sad
 cleaned = df[~df.text.str.contains('|'.join(emotions))]
 
 cleaned = sklearn.utils.shuffle(cleaned, random_state=SEED)
 
-with open(project + '/data/processed/sent_race/vocab', 'r') as f:
+with open(project + '/data/processed/sentiment_race/vocab', 'r') as f:
     vocab = f.readlines()
     vocab = map(lambda s: s.strip(), vocab)
 
 
 vocab_d = {x: 0 for x in vocab}
-pos_wh, pos_aa, neg_wh, neg_aa = read_files(project + '/data/processed/sent_race/')
+pos_wh, pos_aa, neg_wh, neg_aa = read_files(project + '/data/processed/sentiment_race/')
 
 prev_sent = {}
 for s in pos_wh + pos_aa + neg_wh + neg_aa:

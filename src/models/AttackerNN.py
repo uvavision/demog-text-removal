@@ -1,20 +1,27 @@
-import dynet as dy
+import torch
+import torch.nn as nn
+import torch.nn.functionla as F
+
+import torchvision.models as models
+import torch.nn.utils
+
 import numpy as np
 
 
-class AttackerNN(object):
+class AttackerNN(nn.Module):
     def __init__(self, mlp_layers, dropout):
-        model = dy.Model()
+        super(AttackerNN, self).__init__()
 
-        params = {}
-        for i in range(len(mlp_layers)):
-            params["adv_w" + str(i)] = model.add_parameters((mlp_layers[i][1], mlp_layers[i][0]))
-            params["adv_b" + str(i)] = model.add_parameters((mlp_layers[i][1]))
+        mlp = []
+        for i in range(len(mlp_layers) - 1):
+            mlp.append(nn.Linear(mlp_layers[i][0], mlp_layers[i][1], bias=True))
+            mlp.append(nn.Dropout(p=dropout))
+            mlp.append(nn.Tanh())
+        mlp.append(nn.Linear(mlp_layers[-1][0], mlp_layers[-1][1], bias=True))
+        self.mlp = nn.Sequential(*mlp)
 
         self._mlp_layers = len(mlp_layers)
-        self._model = model
-        self._params = params
-        self._dropout = dropout
+        self._dropout = nn.Dropout(p=dropout)
 
     def calc_loss(self, enc_sen, y_adv, vec_drop, train):
         """
@@ -27,32 +34,22 @@ class AttackerNN(object):
         :return:
         """
 
-        w = dy.parameter(self._params["adv_w0"])
-        b = dy.parameter(self._params["adv_b0"])
-
+        out = enc_sen
         if train:
-            drop = self._dropout
-            out = dy.dropout(enc_sen, vec_drop)
+            if vec_drop > 0:
+                vec_drop = nn.Dropout(p=vec_drop)
+                out = vec_drop(enc_sen)
+            self.mlp.train()
         else:
-            drop = 0
-            out = enc_sen
+            self.mlp.eval()
 
-        out = dy.tanh(dy.dropout(dy.affine_transform([b, w, out]), drop))
-        if self._mlp_layers > 2:
-            for i in range(self._mlp_layers - 2):
-                w = dy.parameter(self._params["adv_w" + str(i + 1)])
-                b = dy.parameter(self._params["adv_b" + str(i + 1)])
-                out = dy.tanh(dy.dropout(dy.affine_transform([b, w, out]), drop))
-        w = dy.parameter(self._params["adv_w" + str(self._mlp_layers - 1)])
-        b = dy.parameter(self._params["adv_b" + str(self._mlp_layers - 1)])
-        out = dy.affine_transform([b, w, out])
+        out = self.mlp(out)
+        task_probs = F.softmax(out)
+        adv_loss = F.nll_loss(out, y_adv)
+        return adv_loss, np.argmax(task_probs.data.numpy())
 
-        task_probs = dy.softmax(out)
-        adv_loss = dy.pickneglogsoftmax(out, y_adv)
-        return adv_loss, np.argmax(task_probs.npvalue())
+    #def save(self, f_name):
+    #    self._model.save(f_name)
 
-    def save(self, f_name):
-        self._model.save(f_name)
-
-    def load(self, f_name):
-        self._model.populate(f_name)
+    #def load(self, f_name):
+    #    self._model.populate(f_name)

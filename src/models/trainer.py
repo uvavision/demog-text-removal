@@ -1,6 +1,6 @@
 """
 Usage:
-  sent_demog_train.py [--dynet-mem=MEM] [--dynet-seed=SEED] [--dynet-autobatch=NUM] [--dynet-gpus=NUM] [--dynet-devices=DEVICE]
+  sent_demog_train.py [--batch_size=NUM]
   [--epochs=EPOCHS] [--ro=RO] [--task=TASK] [--type=TYPE] [--num_adv=NUM_ADV] [--adv_depth=NUM_HID_LAY]
   [--lstm_size=LSTM_SIZE] [--dropout=DROPOUT] [--rnn_dropout=RNN_DROPOUT] [--rnn_type=RNN_TYPE]
   [--enc_size=ENC_SIZE] [--adv_size=ADV_SIZE] [--vec_drop=DROPOUT] [--init=INIT]
@@ -8,11 +8,7 @@ Usage:
 
 Options:
   -h --help                     show this help message and exit
-  --dynet-mem=MEM               allocates MEM bytes for dynet
-  --dynet-seed=SEED             dynet random seed
-  --dynet-autobatch=NUM         autobatch for dynet
-  --dynet-gpus=NUM              use gpu
-  --dynet-devices=DEVICE        device to use
+  --batch_size=NUM              batch size
   --epochs=EPOCHS               amount of training epochs [default: 100]
   --ro=RO                       amount of power to the adversarial
   --task=TASK                   single task to train [default: sentiment]
@@ -32,8 +28,20 @@ Options:
 
 import os
 
-import dynet as dy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
+from torch.autograd import Variable
+
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+from torchvision.utils import save_image
+from torch.utils.data import DataLoader
+
 import numpy as np
+import shutil
 from docopt import docopt
 from sklearn.metrics import accuracy_score
 from tensorboard_logger import configure, log_value
@@ -45,9 +53,10 @@ from data_handler import get_data
 from training_utils import get_logger, task_dic
 
 np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.cuda.manual_seed(SEED)
 
-
-def epoch_pass(data, model, trainer, training, ro, vec_drop, batch_size, logger, print_every=20000):
+def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, batch_size, logger, print_every=20000):
     """
     run a single epoch pass on the data
     :param data: data to train/predict on
@@ -63,34 +72,30 @@ def epoch_pass(data, model, trainer, training, ro, vec_drop, batch_size, logger,
     """
     task_preds, adv_preds = [], []
     task_truth, adv_truth = [], []
-    losses = []
+    n_processed = 0
     t_loss = 0.0
     for i in range(num_adv):
         adv_preds.append([])
 
-    for ind, data in enumerate(data):
-        loss, task_pred, adv_pred = model.calc_loss(data[0], data[1], data[2], training,
-                                                    ro, vec_drop)
-        task_preds.append(task_pred)
-        task_truth.append(data[1])
+    for ind, data in enumerate(data_loader):
+        loss, task_pred, adv_pred = model.calc_loss(data[0].cuda(), data[1].cuda(), data[2].cuda(), training, \
+                ro, batch_size, vec_drop)
+        task_preds.append(task_pred.cpu().numpy())
+        task_truth.append(data[1].numpy())
 
         for i in range(len(adv_pred)):
-            adv_preds[i].append(adv_pred[i])
+            adv_preds[i].append(adv_pred[i].cpu().numpy())
 
-        adv_truth.append(data[2])
-        losses.append(loss)
+        adv_truth.append(data[2].numpy())
 
-        if len(losses) == batch_size or ind == len(data) - 1:
-            loss = dy.esum(losses)
+        t_loss += loss.item()
+        n_processed += len(data)
 
-            if training:
-                loss.forward()
-                loss.backward()
-                trainer.update()
-
-            t_loss += loss.npvalue()
-            losses = []
-            dy.renew_cg()
+        if training:
+            # backpropogate
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
         if (ind + 1) % print_every == 0:
             mean = 0.0
@@ -98,34 +103,31 @@ def epoch_pass(data, model, trainer, training, ro, vec_drop, batch_size, logger,
                 mean += accuracy_score(adv_truth, adv_preds[i])
             mean /= len(adv_pred)
             logger.debug('{0}: task loss: {1}, task acc: {2}, mean adv acc: {3}'
-                         .format((ind + 1) / print_every, t_loss[0] / (ind + 1),
+                         .format(ind + 1, t_loss / n_processed,
                                  accuracy_score(task_truth, task_preds), mean))
     adv_res = []
     for i in range(num_adv):
         adv_res.append(accuracy_score(adv_truth, adv_preds[i]))
-    return accuracy_score(task_truth, task_preds), adv_res, t_loss[0] / len(data)
+    return accuracy_score(task_truth, task_preds), adv_res, t_loss / n_processed
 
-
-def train(model, train, dev, trainer, epochs, batch_size,
-          vec_drop, logger, print_every=20000):
+def train(model, train_loader, dev_loader, optimizer, epochs, batch_size, \
+        vec_drop, logger, print_every=20000):
     """
     the training function with the adversarial usage
     """
     train_task_acc_arr, train_adv_acc_arr, train_loss_arr = [], [], []
     dev_task_acc_arr, dev_adv_acc_arr, dev_loss_arr = [], [], []
-    best_model_epoch = 1
     best_score = 0.0
 
     ro = float(arguments['--ro'])
     logger.debug('training started')
     for epoch in xrange(1, epochs + 1):
-        dy.renew_cg()
 
         # train
-        epoch_pass(train, model, trainer, True, ro, vec_drop, batch_size,
-                   logger, print_every)
-        train_task_acc, train_adv_acc, loss = epoch_pass(train, model, trainer, False, ro,
-                                                         vec_drop, batch_size, logger, print_every)
+        epoch_pass(train_loader, model, optimizer, True, ro, vec_drop, batch_size, \
+                logger, print_every)
+        train_task_acc, train_adv_acc, loss = epoch_pass(train_loader, model, optimizer, False, ro, \
+                vec_drop, batch_size, logger, print_every)
 
         train_task_acc_arr.append(train_task_acc)
         train_adv_acc_arr.append(train_adv_acc)
@@ -133,8 +135,8 @@ def train(model, train, dev, trainer, epochs, batch_size,
         logger.debug('train, {0}, {1}, {2}'.format(epoch, train_task_acc, train_adv_acc))
 
         # dev
-        dev_task_acc, dev_adv_acc, loss = epoch_pass(dev, model, trainer, False, ro,
-                                                     0, batch_size, logger, print_every)
+        dev_task_acc, dev_adv_acc, loss = epoch_pass(dev_loader, model, optimizer, False, ro, \
+                0, batch_size, logger, print_every)
         dev_task_acc_arr.append(dev_task_acc)
         dev_adv_acc_arr.append(dev_adv_acc)
         dev_loss_arr.append(loss)
@@ -142,15 +144,14 @@ def train(model, train, dev, trainer, epochs, batch_size,
         log_value('dev-task-acc', dev_task_acc, epoch)
         log_value('dev-mean-adv-acc', np.mean(dev_adv_acc), epoch)
 
-        if dev_task_acc > best_score:
-            best_score = dev_task_acc
-            model.save(models_dir + task + '/best_model')
-            best_model_epoch = epoch
-        if epoch % 10 == 0:
-            model.save(models_dir + task + '/epoch_' + str(epoch))
+        is_best = dev_adv_acc > best_score
+        best_score = max(dev_adv_acc, best_score)
+        save_checkpoint({
+            'epoch': epoch,
+            'state_dict': model.state_dict(),
+            'best_score': best_score}, is_best, models_dir + task + '/checkpoint.pth.tar')
 
     logger.info('best_score:' + str(best_score))
-    logger.info('best_epoch:' + str(best_model_epoch))
     logger.info('train_task_acc:' + str(train_task_acc_arr))
     logger.info('train_adv_acc:' + str(train_adv_acc_arr))
     logger.info('train_loss:' + str(train_loss_arr))
@@ -159,68 +160,70 @@ def train(model, train, dev, trainer, epochs, batch_size,
     logger.info('dev_loss:' + str(dev_loss_arr))
 
 
-def train_task(model, train, dev, trainer, epochs, batch_size, task_type, logger, print_every=20000):
+def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, task_type, \
+        logger, print_every=20000):
     """
     the training function for a single task. used for the baseline experiments
     """
     # train_task_acc_arr, train_loss_arr = [], []
     dev_task_acc_arr, dev_loss_arr = [], []
-    best_model_epoch = 1
     best_score = 0.0
 
     logger.debug('training started')
     for epoch in xrange(1, epochs + 1):
-        dy.renew_cg()
         t_loss = 0.0
-        adv_preds, adv_truth, losses = [], [], []
+        adv_preds, adv_truth = [], []
+        n_processed = 0
         # train
-        for ind, data in enumerate(train):
-            loss, adv_pred = model.adv_loss(data[0], data[task_type], True)
-            adv_preds.append(adv_pred)
-            adv_truth.append(data[task_type])
+        for ind, data in enumerate(train_loader):
+            loss, adv_pred = model.adv_loss(data[0].cuda(), data[task_type].cuda(), True, batch_size)
+            adv_preds.append(adv_pred.cpu().numpy())
+            adv_truth.append(data[task_type].numpy())
 
-            losses.append(loss)
+            t_loss += loss.item()
+            n_processed += len(data)
 
-            if len(losses) == batch_size or ind == len(train) - 1:
-                loss = dy.esum(losses)
-                loss.forward()
-                loss.backward()
-                trainer.update()
-
-                t_loss += loss.npvalue()
-                losses = []
-                dy.renew_cg()
+            # backpropogate
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
             if (ind + 1) % print_every == 0:
-                logger.debug('{0}: task loss: {1}, adv acc: {2}'.format((ind + 1) / print_every, t_loss / (ind + 1),
-                                                                        accuracy_score(adv_truth, adv_preds)))
+                logger.debug('{0}: task loss: {1}, adv acc: {2}'.format(ind + 1, t_loss / n_processed, \
+                        accuracy_score(adv_truth, adv_preds)))
         # dev
         t_loss = 0.0
         adv_preds = []
         adv_truth = []
-        for ind, data in enumerate(dev):
-            dy.renew_cg()
-            loss, adv_pred = model.adv_loss(data[0], data[task_type], False)
-            adv_preds.append(adv_pred)
-            adv_truth.append(data[task_type])
+        n_processed = 0
+        for ind, data in enumerate(dev_loader):
+            loss, adv_pred = model.adv_loss(data[0].cuda(), data[task_type].cuda(), False, batch_size)
+            adv_preds.append(adv_pred.cpu().numpy())
+            adv_truth.append(data[task_type].numpy())
 
-            t_loss += loss.npvalue()
+            t_loss += loss.item()
+            n_processed += len(data)
+
         adv_acc = accuracy_score(adv_truth, adv_preds)
         dev_task_acc_arr.append(adv_acc)
-        dev_loss_arr.append(t_loss[0])
-        logger.debug('dev-task epoch: {0}, acc: {1}, loss: {2}'.format(epoch, adv_acc, t_loss[0] / len(dev)))
+        dev_loss_arr.append(t_loss / n_processed)
+        logger.debug('dev-task epoch: {0}, acc: {1}, loss: {2}'.format(epoch, adv_acc, \
+                t_loss[0] / n_processed))
         log_value('dev-task-acc', adv_acc, epoch)
-        if adv_acc > best_score:
-            best_score = adv_acc
-            best_model_epoch = epoch
-            model.save(models_dir + task + '/best_model')
-        if epoch % 10 == 0:
-            model.save(models_dir + task + '/epoch_' + str(epoch))
+        is_best = adv_acc > best_score
+        best_score = max(best_score, adv_acc)
+        save_checkpoint({
+            'epoch': epoch,
+            'state_dict': model.state_dict(),
+            'best_score': best_score}, is_best, models_dir + task + '/checkpoint.pth.tar')
     logger.info('best_score:' + str(best_score))
-    logger.info('best_epoch:' + str(best_model_epoch))
     logger.info('dev_task_acc:' + str(dev_task_acc_arr))
     logger.info('dev_loss:' + str(dev_loss_arr))
 
+def save_checkpoint(state, is_best, filename):
+    torch.save(state, filename)
+    if is_best:
+        shutil.copyfile(filename, filename.replace('checkpoint', 'model_best'))
 
 if __name__ == '__main__':
     arguments = docopt(__doc__)
@@ -230,6 +233,7 @@ if __name__ == '__main__':
     lstm_size = int(arguments['--lstm_size'])
     task_str = arguments['--task']
     num_epoch = int(arguments['--epochs'])
+    batch_size = int(arguments['--batch_size'])
 
     input_dir = data_dir
 
@@ -309,24 +313,24 @@ if __name__ == '__main__':
     home = expanduser("~")
     configure(tensorboard_dir + task)
 
-    x_train, x_test = get_data(task_str, input_dir)
-
-    np.random.shuffle(x_train)
+    train_data, test_data = get_data(task_str, input_dir)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, num_workers=4)
 
     out_size = 2
-
     with open(input_vocab, 'r') as f:
         vocab = f.readlines()
         vocab = map(lambda s: s.strip(), vocab)
     vocab_size = len(vocab)
     adv_net = AdvNN(hid_size, hid_size, out_size, hid_size, adv_hid_size, out_size, num_adv, vocab_size,
                     dropout, lstm_size, adv_depth, rnn_dropout=rnn_dropout, rnn_type=rnn_type)
+    adv_net = nn.DataParallel(adv_net).cuda()
 
-    trainer = dy.MomentumSGDTrainer(adv_net._model)
-    batch = 32
+    optimizer = optim.SGD(adv_net.parameters(), lr=0.01, momentum=0.9)
+
     if ro == str(-1):
         logger.debug('1 task')
-        train_task(adv_net, x_train, x_test, trainer, num_epoch, batch, task_type, logger)
+        train_task(adv_net, train_loader, test_loader, optimizer, num_epoch, batch_size, task_type, logger)
     else:
         logger.debug('2 tasks')
-        train(adv_net, x_train, x_test, trainer, num_epoch, batch, vec_dropout, logger)
+        train(adv_net, train_loader, test_loader, optimizer, num_epoch, batch_size, vec_dropout, logger)
