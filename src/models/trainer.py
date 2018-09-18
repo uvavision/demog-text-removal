@@ -49,14 +49,14 @@ from os.path import expanduser
 
 from AdvNN import AdvNN
 from consts import SEED, data_dir, models_dir, tensorboard_dir
-from data_handler import get_data
+from data_handler import get_data, collate_fn
 from training_utils import get_logger, task_dic
 
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 
-def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, batch_size, logger, print_every=20000):
+def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, logger, print_every=500):
     """
     run a single epoch pass on the data
     :param data: data to train/predict on
@@ -65,7 +65,6 @@ def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, batch_size
     :param training: boolean - for training/testing purposes
     :param ro: lambda used in paper. determines the adversarial power
     :param vec_drop: dropout on the representation vector
-    :param batch_size: size of batch
     :param logger: .
     :param print_every: print the accumulative stats
     :return: accuracy score of the main task, the adversary task and the total loss.
@@ -78,15 +77,16 @@ def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, batch_size
         adv_preds.append([])
 
     for ind, data in enumerate(data_loader):
-        loss, task_pred, adv_pred = model.calc_loss(data[0].cuda(), data[1].cuda(), data[2].cuda(), training, \
-                ro, batch_size, vec_drop)
-        task_preds.append(task_pred.cpu().numpy())
-        task_truth.append(data[1].numpy())
+        loss, task_pred, adv_pred = model.calc_loss(data[0].cuda(), data[3], data[1].cuda(), \
+                data[2].cuda(), training, \
+                ro, vec_drop)
+        task_preds += task_pred.tolist()
+        task_truth += data[1].numpy().tolist()
 
         for i in range(len(adv_pred)):
-            adv_preds[i].append(adv_pred[i].cpu().numpy())
+            adv_preds[i] += adv_pred[i].tolist()
 
-        adv_truth.append(data[2].numpy())
+        adv_truth += data[2].numpy().tolist()
 
         t_loss += loss.item()
         n_processed += len(data)
@@ -110,8 +110,8 @@ def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, batch_size
         adv_res.append(accuracy_score(adv_truth, adv_preds[i]))
     return accuracy_score(task_truth, task_preds), adv_res, t_loss / n_processed
 
-def train(model, train_loader, dev_loader, optimizer, epochs, batch_size, \
-        vec_drop, logger, print_every=20000):
+def train(model, train_loader, dev_loader, optimizer, epochs, \
+        vec_drop, logger, print_every=500):
     """
     the training function with the adversarial usage
     """
@@ -124,10 +124,10 @@ def train(model, train_loader, dev_loader, optimizer, epochs, batch_size, \
     for epoch in xrange(1, epochs + 1):
 
         # train
-        epoch_pass(train_loader, model, optimizer, True, ro, vec_drop, batch_size, \
+        epoch_pass(train_loader, model, optimizer, True, ro, vec_drop, \
                 logger, print_every)
         train_task_acc, train_adv_acc, loss = epoch_pass(train_loader, model, optimizer, False, ro, \
-                vec_drop, batch_size, logger, print_every)
+                vec_drop, logger, print_every)
 
         train_task_acc_arr.append(train_task_acc)
         train_adv_acc_arr.append(train_adv_acc)
@@ -136,7 +136,7 @@ def train(model, train_loader, dev_loader, optimizer, epochs, batch_size, \
 
         # dev
         dev_task_acc, dev_adv_acc, loss = epoch_pass(dev_loader, model, optimizer, False, ro, \
-                0, batch_size, logger, print_every)
+                0, logger, print_every)
         dev_task_acc_arr.append(dev_task_acc)
         dev_adv_acc_arr.append(dev_adv_acc)
         dev_loss_arr.append(loss)
@@ -160,8 +160,8 @@ def train(model, train_loader, dev_loader, optimizer, epochs, batch_size, \
     logger.info('dev_loss:' + str(dev_loss_arr))
 
 
-def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, task_type, \
-        logger, print_every=20000):
+def train_task(model, train_loader, dev_loader, optimizer, epochs, task_type, \
+        logger, print_every=500):
     """
     the training function for a single task. used for the baseline experiments
     """
@@ -176,10 +176,10 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, t
         n_processed = 0
         # train
         for ind, data in enumerate(train_loader):
-            loss, adv_pred = model.adv_loss(data[0].cuda(), data[task_type].cuda(), True, batch_size)
-            adv_preds.append(adv_pred.cpu().numpy())
-            adv_truth.append(data[task_type].numpy())
-
+            loss, adv_pred = model.adv_loss(data[0].cuda(), data[3], data[task_type].cuda(), \
+                    True)
+            adv_preds += adv_pred.tolist()
+            adv_truth += data[task_type].numpy().tolist()
             t_loss += loss.item()
             n_processed += len(data)
 
@@ -187,7 +187,6 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, t
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
             if (ind + 1) % print_every == 0:
                 logger.debug('{0}: task loss: {1}, adv acc: {2}'.format(ind + 1, t_loss / n_processed, \
                         accuracy_score(adv_truth, adv_preds)))
@@ -197,9 +196,10 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, t
         adv_truth = []
         n_processed = 0
         for ind, data in enumerate(dev_loader):
-            loss, adv_pred = model.adv_loss(data[0].cuda(), data[task_type].cuda(), False, batch_size)
-            adv_preds.append(adv_pred.cpu().numpy())
-            adv_truth.append(data[task_type].numpy())
+            loss, adv_pred = model.adv_loss(data[0].cuda(), data[3], data[task_type].cuda(), \
+                    False)
+            adv_preds += adv_pred.tolist()
+            adv_truth += data[task_type].numpy().tolist()
 
             t_loss += loss.item()
             n_processed += len(data)
@@ -208,7 +208,7 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, batch_size, t
         dev_task_acc_arr.append(adv_acc)
         dev_loss_arr.append(t_loss / n_processed)
         logger.debug('dev-task epoch: {0}, acc: {1}, loss: {2}'.format(epoch, adv_acc, \
-                t_loss[0] / n_processed))
+                t_loss / n_processed))
         log_value('dev-task-acc', adv_acc, epoch)
         is_best = adv_acc > best_score
         best_score = max(best_score, adv_acc)
@@ -314,8 +314,10 @@ if __name__ == '__main__':
     configure(tensorboard_dir + task)
 
     train_data, test_data = get_data(task_str, input_dir)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, \
+            num_workers=6, collate_fn=collate_fn)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, \
+            num_workers=4, collate_fn=collate_fn)
 
     out_size = 2
     with open(input_vocab, 'r') as f:
@@ -324,13 +326,13 @@ if __name__ == '__main__':
     vocab_size = len(vocab)
     adv_net = AdvNN(hid_size, hid_size, out_size, hid_size, adv_hid_size, out_size, num_adv, vocab_size,
                     dropout, lstm_size, adv_depth, rnn_dropout=rnn_dropout, rnn_type=rnn_type)
-    adv_net = nn.DataParallel(adv_net).cuda()
+    adv_net = adv_net.cuda()
 
     optimizer = optim.SGD(adv_net.parameters(), lr=0.01, momentum=0.9)
 
     if ro == str(-1):
         logger.debug('1 task')
-        train_task(adv_net, train_loader, test_loader, optimizer, num_epoch, batch_size, task_type, logger)
+        train_task(adv_net, train_loader, test_loader, optimizer, num_epoch, task_type, logger)
     else:
         logger.debug('2 tasks')
-        train(adv_net, train_loader, test_loader, optimizer, num_epoch, batch_size, vec_dropout, logger)
+        train(adv_net, train_loader, test_loader, optimizer, num_epoch, vec_dropout, logger)

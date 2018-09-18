@@ -108,7 +108,6 @@ def get_data(main_task, data_dir):
         x_train, x_test = get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, 42500, 40000)
     else:
         x_train, x_test = get_labeled_data(pos_pos, pos_neg, neg_pos, neg_neg, total, train_s)
-
     print('training set size: {} and test set size: {}'.format(len(x_train), len(x_test)))
     train_data = AdvDemogTextData(x_train)
     test_data = AdvDemogTextData(x_test)
@@ -126,11 +125,29 @@ class AdvDemogTextData(data.Dataset):
 
     def __getitem__(self, index):
         sample = self.data[index]
-        sentence = torch.Tensor(self.data[0]).int()
-        y_task = torch.Tensor(self.data[1]).int()
-        y_adv = torch.Tensor(self.data[2])
-
+        sentence = torch.Tensor(sample[0]).long()
+        y_task = torch.Tensor([sample[1]]).long()
+        y_adv = torch.Tensor([sample[2]]).long()
         return sentence, y_task, y_adv
 
     def __len__(self):
         return len(self.data)
+
+def collate_fn(data):
+    """
+    we should build custom collate_fn because mergeing sentences are not supported by
+    default collate_fn funciton.
+    """
+    data.sort(key=lambda x: len(x[0]), reverse=True)
+    sentences, y_tasks, y_advs = zip(*data)
+    lengths = [len(sentence) for sentence in sentences]
+    padded_sents = torch.zeros(len(sentences), max(lengths)).long()
+    for i, sent in enumerate(sentences):
+        end = lengths[i]
+        padded_sents[i, :end] = sent[:end] + 1
+
+    y_tasks = torch.stack(y_tasks, 0).squeeze()
+    y_advs = torch.stack(y_advs, 0).squeeze()
+
+    return padded_sents, y_tasks, y_advs, lengths
+

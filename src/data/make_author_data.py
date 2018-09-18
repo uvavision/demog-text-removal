@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from data_utils import mention_split, normalize_text, MENTION, to_file, SEED
 
-project = '/zf15/tw8cb/PhD/visual_gender_bias/demog-text-removal/'
+project = '/zf15/tw8cb/demog-text-removal/'
 MIN_SENTENCE_LEN = 3
 
 df = pd.read_csv(project + 'data/interim/author-profiling.tsv', sep='\t',

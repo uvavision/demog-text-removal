@@ -3,7 +3,7 @@ import sys
 import sklearn.utils
 from tqdm import tqdm
 
-project = '/zf15/tw8cb/PhD/visual_gender_bias/demog-text-removal'
+project = '/zf15/tw8cb/demog-text-removal'
 sys.path.insert(0, project + '/src/models')
 
 from data_utils import get_data, CONF_LEVEL, normalize_text, to_file

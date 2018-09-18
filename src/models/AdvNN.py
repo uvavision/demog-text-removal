@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torchvision.models as models
 import torch.nn.utils
 from torch.autograd import Function
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 import numpy as np
 
@@ -25,11 +26,11 @@ class AdvNN(nn.Module):
             self._rnn = nn.RNN(input_size=task_in_size, hidden_size=task_hid_size, num_layers=lstm_size, \
                     nonlinearity='tanh', bias=True, batch_first=True, dropout=rnn_dropout, bidirectional=False)
 
-        self.encoder = nn.Embedding(vocab_size, task_in_size)
+        self.encoder = nn.Embedding(vocab_size + 1, task_in_size)
 
         task = []
         task.append(nn.Linear(task_in_size, task_hid_size, bias=True))
-        task.append(nn.Dropout(p=Dropout))
+        task.append(nn.Dropout(p=dropout))
         task.append(nn.Tanh())
         task.append(nn.Linear(task_hid_size, task_out_size, bias=True))
         self.task = nn.Sequential(*task)
@@ -42,7 +43,7 @@ class AdvNN(nn.Module):
                 adv.append(nn.Dropout(p=dropout))
                 adv.append(nn.Tanh())
             adv.append(nn.Linear(adv_hid_size, adv_out_size, bias=True))
-            self.advs.append(nn.Sequential(*adv))
+            self.advs.append(nn.Sequential(*adv).cuda())
 
 
         self._hid_dim = task_hid_size
@@ -58,25 +59,28 @@ class AdvNN(nn.Module):
     def init_hidden(self, batch_size=32):
         weight = next(self.parameters())
         if self._rnn_type == 'lstm':
-            return (weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim), \
-                    weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim))
+            return (weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim).cuda(), \
+                    weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim).cuda())
         else:
-            return weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim)
+            return weight.new_zeros(self._rnn_layers, batch_size, self._hid_dim).cuda()
 
-    def encode_sentence(self, sentence, hidden, train=False):
+    def encode_sentence(self, sentence, lengths, hidden, train=False):
         """
         simple rnn encoder.
         each token gets embedded, and calculating the rnn over all of them.
         returning the final hidden state
         """
         emb_words = self.encoder(sentence)
-
+        packed_embd_words = pack_padded_sequence(emb_words, lengths, batch_first=True)
         if train:
             self._rnn.train() # activate dropout duirng training
         else:
             self._rnn.eval() # freeze dropout during testing
 
-        output, hidden = self._rnn(emb_words, hidden)
+        output, hidden = self._rnn(packed_embd_words, hidden)
+        if self._rnn_type == 'lstm':
+            hidden = hidden[0]
+        hidden = hidden.squeeze()
         return hidden
 
     def task_mlp(self, vec_sen, train):
@@ -88,7 +92,6 @@ class AdvNN(nn.Module):
             self.task.train()
         else:
             self.task.eval()
-
         return self.task(vec_sen)
 
     def adv_mlp(self, vec_sen, adv_ind, train, vec_drop):
@@ -96,31 +99,30 @@ class AdvNN(nn.Module):
         calculating the adversarial mlp over the sentence representation vector.
         more than a single adversarial mlp is supported
         """
-
         out = vec_sen
         adv = self.advs[adv_ind]
         if train:
             if vec_drop > 0:
                 vec_drop = nn.Dropout(p=vec_drop)
                 out = vec_drop(vec_sen)
-            adv.train()
+            self.advs[adv_ind].train()
         else:
-            adv.eval()
+            self.advs[adv_ind].eval()
 
-        return adv(out)
+        return self.advs[adv_ind](out)
 
     # based on: Unsupervised Domain Adaptation by Backpropagation, Yaroslav Ganin & Victor Lempitsky
-    def calc_loss(self, sentence, y_task, y_adv, train, ro, batch_size, vec_drop=0):
+    def calc_loss(self, sentence, lengths, y_task, y_adv, train, ro, vec_drop=0):
         """
         calculating the loss over a single example.
         accumulating the main task and adversarial task loss together.
         """
-        hidden = self.init_hidden(batch_size)
-        sen = self.encode_sentence(sentence, train=train)
+        hidden = self.init_hidden(len(sentence))
+        sen = self.encode_sentence(sentence, lengths, hidden, train=train)
 
         task_res = self.task_mlp(sen, train)
-        task_probs = F.softmax(task_res)
-        task_loss = F.nll_loss(task_res, y_task, reduction='sum')
+        task_probs = F.softmax(task_res, dim=1)
+        task_loss = F.cross_entropy(task_res, y_task, reduction='sum')
 
         adversarial_res = []
         if ro > 0:
@@ -129,9 +131,9 @@ class AdvNN(nn.Module):
             for i in range(self._adv_count):
                 reversed_sen = ReverseLayerF.apply(sen, ro)
                 adv_res = self.adv_mlp(reversed_sen, i, train, vec_drop)
-                probs = F.softmax(adv_res)
-                adversarial_res.append(np.argmax(probs.data.numpy()))
-                adversarial_losses.append(F.nll_loss(adv_res, y_adv, reduction='sum'))
+                probs = F.softmax(adv_res, dim=1)
+                adversarial_res.append(np.argmax(probs.detach().numpy()), axis=1)
+                adversarial_losses.append(F.cross_entropy(adv_res, y_adv, reduction='sum'))
 
             adversarial_loss_sum = adversarial_losses[0]
             if self._adv_count > 1:
@@ -142,9 +144,9 @@ class AdvNN(nn.Module):
         else:
             total_loss = task_loss
 
-        return total_loss, np.argmax(task_probs.data.numpy()), adversarial_res
+        return total_loss, np.argmax(task_probs.cpu().detach().numpy(), axis=1), adversarial_res
 
-    def adv_loss(self, sentence, y_adv, train, batch_size):
+    def adv_loss(self, sentence, lengths, y_adv, train):
         """
         calculating the loss for just a single class. mainly for the baseline models.
         :param sentence:
@@ -152,12 +154,12 @@ class AdvNN(nn.Module):
         :param train:
         :return:
         """
-        hidden = self.init_hidden(batch_size)
-        sen = self.encode_sentence(sentence, train=train)
+        hidden = self.init_hidden(len(sentence))
+        sen = self.encode_sentence(sentence, lengths, hidden, train=train)
         adv_res = self.adv_mlp(sen, 0, train, 0)
-        adv_probs = F.softmax(adv_res)
-        adv_loss = F.nll_loss(adv_res, y_adv, reduction='sum')
-        return adv_loss, np.argmax((adv_probs.dtaat.numpy()))
+        adv_probs = F.softmax(adv_res, dim=1)
+        adv_loss = F.cross_entropy(adv_res, y_adv, reduction='sum')
+        return adv_loss, np.argmax((adv_probs.cpu().detach().numpy()), axis=1)
 
     #def save(self, f_name):
     #    self._model.save(f_name)

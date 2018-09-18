@@ -44,9 +44,9 @@ class AttackerNN(nn.Module):
             self.mlp.eval()
 
         out = self.mlp(out)
-        task_probs = F.softmax(out)
+        task_probs = F.softmax(out, dim=1)
         adv_loss = F.nll_loss(out, y_adv)
-        return adv_loss, np.argmax(task_probs.data.numpy())
+        return adv_loss, np.argmax(task_probs.ddetach().numpy(), axis=1)
 
     #def save(self, f_name):
     #    self._model.save(f_name)

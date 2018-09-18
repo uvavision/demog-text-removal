@@ -64,17 +64,17 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed(SEED)
 
-def epoch_pass(data_loader, model, enc_net, optimizer, training, batch_size, vec_drop, truth_ind, \
-        logger, print_every=20000):
+def epoch_pass(data_loader, model, enc_net, optimizer, training, vec_drop, truth_ind, \
+        logger, print_every=500):
 
     t_loss = 0.0
     preds, truth = [], []
     n_processed = 0
 
     for ind, row in enumerate(data):
-        sent = enc_net.encode_sentence(row[0].cuda(), train=False)
+        sent = enc_net.encode_sentence(row[0].cuda(), row[3], train=False)
         loss, adv_pred = model.calc_loss(sent, row[truth_ind], vec_drop, train=training)
-        preds.append(adv_pred.cpu().numpy())
+        preds.append(adv_pred)
         truth.append(row[truth_ind].numpy())
 
         if training:
@@ -91,8 +91,8 @@ def epoch_pass(data_loader, model, enc_net, optimizer, training, batch_size, vec
     return accuracy_score(truth, preds), t_loss / n_processed
 
 
-def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, batch_size, \
-        logger, truth_ind=2, print_every=20000):
+def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, \
+        logger, truth_ind=2, print_every=500):
     """
     training method
     :param model: attacker model
@@ -101,7 +101,6 @@ def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, b
     :param trainer: optimizer
     :param epochs: number of epochs
     :param vec_drop: representation vector (of the sentence) dropout
-    :param batch_size: size of batch
     :param logger:
     :param truth_ind: index of the truth in the train/dev set
     :param print_every: print every x examples in each epoch
@@ -116,16 +115,16 @@ def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, b
     for epoch in xrange(1, epochs + 1):
 
         # train
-        epoch_pass(train_loader, model, enc_net, optimizer, True, batch_size, vec_drop, truth_ind, \
+        epoch_pass(train_loader, model, enc_net, optimizer, True, vec_drop, truth_ind, \
                 logger, print_every)
-        train_task_acc, loss = epoch_pass(train_loader, model, enc_net, optimizer, False, batch_size, \
+        train_task_acc, loss = epoch_pass(train_loader, model, enc_net, optimizer, False, \
                 vec_drop, truth_ind, logger, print_every)
         train_acc_arr.append(train_task_acc)
         train_loss_arr.append(loss)
         logger.debug('train, {0}, adv acc: {1}'.format(epoch, train_task_acc))
 
         # dev
-        dev_task_acc, loss = epoch_pass(dev_loader, model, enc_net, optimizer, False, batch_size, \
+        dev_task_acc, loss = epoch_pass(dev_loader, model, enc_net, optimizer, False, \
                 vec_drop, truth_ind, logger, print_every)
         dev_acc_arr.append(dev_task_acc)
         dev_loss_arr.append(loss)
@@ -275,4 +274,4 @@ if __name__ == '__main__':
 
         m_task = 2
     train(adv_net, enc_net, train_loader, test_loader, optimizer, int(arguments['--epochs']), \
-            vec_drop, batch_size, logger, m_task)
+            vec_drop, logger, m_task)
