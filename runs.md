@@ -1,7 +1,55 @@
 - [x] Baselines
+### single sentiment task
 ```bash
-python trainer.py --dynet-seed 12345 --dynet-gpus 1 --dynet-autobatch 1 --ro -1 --task sentiment --type 1
+python trainer.py --batch_size 32 --ro -1 --task sentiment --type 1
+```
+* log path: sentiment-type:1-ro:-1
+* acc on dev(pytorch): 69.54, reported acc on dev(dynet): 67.4
 
+#### race leakage on sentiment task
+```bash
+python attacker.py --ro -1 --task race --model sentiment-type:1-ro:-1/model_best.pth.tar --init 1 --batch_size 32
+```
+* log path: attacker-sentiment-type:1-ro:-1
+* acc on dev(pytorch): 65.33, reported acc on dev(dynet): 64.5
+
+### single race task
+```bash
+python trainer.py --batch_size 32 --ro -1 --task race --type 2 --lr 0.01 
+```
+* log path: race-type:2-ro:-1
+* acc on dev(pytorch): 82.4, reported acc on dev(dynet): 83.9
+
+### single unbalanced sentiment task
+```bash
+python trainer.py --batch_size 32 --ro -1 --task unbalanced_race --type 1
+```
+* log path: unbalanced_race-type:1-ro:-1
+* acc on dev(pytorch): 80.19, reported acc on dev(dynet): 79.5
+
+### single unbalanced race task
+```bash
+python trainer.py --batch_size 32 --ro -1 --task unbalanced_race --type 2
+```
+* log path: unbalanced_race-type:2-ro:-1
+* acc on dev(pytorch): , reported acc on dev(dynet): --
+
+#### race leakage on sentiment task, unbalanced
+```bash
+
+```
+* log path: attacker-unbalanced_race-type:1-ro:-1
+* acc on dev(pytorch): , reported acc on dev(dynet): 73.5
+
+#### Adv, race leakage on sentiment task
+```bash
+
+```
+* log path: 
+* acc on sentiment dev(pytorch): , reported sentiment acc on dev(dynet): 64.7
+* acc on race dev(pytorch): , reported race acc on dev(dynet): 56.0
+
+```
 python attacker.py --dynet-seed 12345 --dynet-autobatch 1 --ro -1 --task race --model sentiment-type:1-ro:-1/best_model --init 1
 
 python trainer.py --dynet-seed 12345 --dynet-autobatch 1 --ro -1 --task race --type 2
