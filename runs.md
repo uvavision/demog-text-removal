@@ -32,18 +32,18 @@ python trainer.py --batch_size 32 --ro -1 --task unbalanced_race --type 1
 python trainer.py --batch_size 32 --ro -1 --task unbalanced_race --type 2
 ```
 * log path: unbalanced_race-type:2-ro:-1
-* acc on dev(pytorch): , reported acc on dev(dynet): --
+* acc on dev(pytorch): 86.44, reported acc on dev(dynet): --
 
 #### race leakage on sentiment task, unbalanced
 ```bash
-
+python attacker.py --batch_size 32 --ro -1 --task unbalanced_race --model unbalanced_race-type:1-ro:-1/model_best.pth.tar
 ```
 * log path: attacker-unbalanced_race-type:1-ro:-1
-* acc on dev(pytorch): , reported acc on dev(dynet): 73.5
+* acc on dev(pytorch): 81.21, reported acc on dev(dynet): 73.5
 
 #### Adv, race leakage on sentiment task
 ```bash
-
+python trainer.py --batch_size 32 --ro 1 --task sent_race --num_adv 1 --lr 0.01
 ```
 * log path: 
 * acc on sentiment dev(pytorch): , reported sentiment acc on dev(dynet): 64.7
