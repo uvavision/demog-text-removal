@@ -132,7 +132,7 @@ class AdvNN(nn.Module):
                 reversed_sen = ReverseLayerF.apply(sen, ro)
                 adv_res = self.adv_mlp(reversed_sen, i, train, vec_drop)
                 probs = F.softmax(adv_res, dim=1)
-                adversarial_res.append(np.argmax(probs.detach().numpy()), axis=1)
+                adversarial_res.append(np.argmax(probs.cpu().detach().numpy(), axis=1))
                 adversarial_losses.append(F.cross_entropy(adv_res, y_adv, reduction='sum'))
 
             adversarial_loss_sum = adversarial_losses[0]
@@ -170,11 +170,11 @@ class AdvNN(nn.Module):
 class ReverseLayerF(Function):
 
     @staticmethod
-    def forward(cts, x, alpha):
+    def forward(ctx, x, alpha):
         ctx.alpha = alpha
 
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output.neg() * ctx.alpha
+        return grad_output.neg() * ctx.alpha, None

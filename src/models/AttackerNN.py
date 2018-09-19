@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functionla as F
+import torch.nn.functional as F
 
 import torchvision.models as models
 import torch.nn.utils
@@ -45,8 +45,8 @@ class AttackerNN(nn.Module):
 
         out = self.mlp(out)
         task_probs = F.softmax(out, dim=1)
-        adv_loss = F.nll_loss(out, y_adv)
-        return adv_loss, np.argmax(task_probs.ddetach().numpy(), axis=1)
+        adv_loss = F.cross_entropy(out, y_adv)
+        return adv_loss, np.argmax(task_probs.cpu().detach().numpy(), axis=1)
 
     #def save(self, f_name):
     #    self._model.save(f_name)

@@ -1,6 +1,6 @@
 """
 Usage:
-  sent_demog_train.py [--batch_size=NUM]
+  sent_demog_train.py [--batch_size=NUM] [--lr=LEARNING_RATE]
   [--epochs=EPOCHS] [--ro=RO] [--task=TASK] [--type=TYPE] [--num_adv=NUM_ADV] [--adv_depth=NUM_HID_LAY]
   [--lstm_size=LSTM_SIZE] [--dropout=DROPOUT] [--rnn_dropout=RNN_DROPOUT] [--rnn_type=RNN_TYPE]
   [--enc_size=ENC_SIZE] [--adv_size=ADV_SIZE] [--vec_drop=DROPOUT] [--init=INIT]
@@ -9,6 +9,7 @@ Usage:
 Options:
   -h --help                     show this help message and exit
   --batch_size=NUM              batch size
+  --lr=LEARNING                 learning rate [default: 0.01]
   --epochs=EPOCHS               amount of training epochs [default: 100]
   --ro=RO                       amount of power to the adversarial
   --task=TASK                   single task to train [default: sentiment]
@@ -234,6 +235,7 @@ if __name__ == '__main__':
     task_str = arguments['--task']
     num_epoch = int(arguments['--epochs'])
     batch_size = int(arguments['--batch_size'])
+    lr = float(arguments['--lr'])
 
     input_dir = data_dir
 
@@ -328,7 +330,7 @@ if __name__ == '__main__':
                     dropout, lstm_size, adv_depth, rnn_dropout=rnn_dropout, rnn_type=rnn_type)
     adv_net = adv_net.cuda()
 
-    optimizer = optim.SGD(adv_net.parameters(), lr=0.01, momentum=0.9)
+    optimizer = optim.SGD(adv_net.parameters(), lr=lr, momentum=0.9)
 
     if ro == str(-1):
         logger.debug('1 task')

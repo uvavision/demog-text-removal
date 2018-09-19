@@ -56,7 +56,7 @@ from os.path import expanduser
 
 from AdvNN import AdvNN
 from AttackerNN import AttackerNN
-from data_handler import get_data
+from data_handler import get_data, collate_fn
 from training_utils import get_logger, task_dic
 from consts import SEED, models_dir, tensorboard_dir, data_dir
 
@@ -71,11 +71,12 @@ def epoch_pass(data_loader, model, enc_net, optimizer, training, vec_drop, truth
     preds, truth = [], []
     n_processed = 0
 
-    for ind, row in enumerate(data):
-        sent = enc_net.encode_sentence(row[0].cuda(), row[3], train=False)
-        loss, adv_pred = model.calc_loss(sent, row[truth_ind], vec_drop, train=training)
-        preds.append(adv_pred)
-        truth.append(row[truth_ind].numpy())
+    for ind, row in enumerate(data_loader):
+        hidden = enc_net.init_hidden(len(row[0]))
+        sent = enc_net.encode_sentence(row[0].cuda(), row[3], hidden, train=False)
+        loss, adv_pred = model.calc_loss(sent.detach(), row[truth_ind].cuda(), vec_drop, train=training)
+        preds += adv_pred.tolist()
+        truth += row[truth_ind].numpy().tolist()
 
         if training:
             optimizer.zero_grad()
@@ -91,7 +92,7 @@ def epoch_pass(data_loader, model, enc_net, optimizer, training, vec_drop, truth
     return accuracy_score(truth, preds), t_loss / n_processed
 
 
-def train(model, enc_net, train_loader, dev_loader, trainer, epochs, vec_drop, \
+def train(model, enc_net, train_loader, dev_loader, optimizer, epochs, vec_drop, \
         logger, truth_ind=2, print_every=500):
     """
     training method
@@ -228,8 +229,10 @@ if __name__ == '__main__':
 
     configure(tensorboard_dir + task)
     train_data, test_data = get_data(task_str, input_dir)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=6)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, pin_memory=True, \
+            num_workers=6, collate_fn=collate_fn)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, pin_memory=False, \
+            num_workers=4, collate_fn=collate_fn)
 
     with open(input_vocab, 'r') as f:
         vocab = f.readlines()
@@ -237,9 +240,11 @@ if __name__ == '__main__':
     vocab_size = len(vocab)
     enc_net = AdvNN(hid_size, hid_size, 2, hid_size, adv_hid_size, 2, num_adv, vocab_size, dropout,
                     lstm_size, adv_depth, rnn_type=arguments['--rnn_type'])
-    enc_net = nn.DataParallel(enc_net).cuda()
+
     checkpoint = torch.load(models_dir + attacked_model)
     enc_net.load_state_dict(checkpoint['state_dict'])
+    enc_net = enc_net.cuda()
+    enc_net.eval()
 
     if arguments['--model_flip'] != '0':
         encoder2 = AdvNN(hid_size, hid_size, 2, hid_size, adv_hid_size, 2, 5, vocab_size, dropout,
@@ -260,7 +265,9 @@ if __name__ == '__main__':
         mlp.append((hid_size, 2))
     else:
         mlp.append((att_mlp_size, 2))
+
     adv_net = AttackerNN(mlp, dropout)
+    adv_net = adv_net.cuda()
 
     lr = float(arguments['--lr'])
     if 'fix' in task or 'length' in task:
