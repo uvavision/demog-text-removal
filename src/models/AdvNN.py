@@ -122,7 +122,7 @@ class AdvNN(nn.Module):
 
         task_res = self.task_mlp(sen, train)
         task_probs = F.softmax(task_res, dim=1)
-        task_loss = F.cross_entropy(task_res, y_task, reduction='sum')
+        task_loss = F.cross_entropy(task_res, y_task, reduction='elementwise_mean')
 
         adversarial_res = []
         if ro > 0:
@@ -133,13 +133,12 @@ class AdvNN(nn.Module):
                 adv_res = self.adv_mlp(reversed_sen, i, train, vec_drop)
                 probs = F.softmax(adv_res, dim=1)
                 adversarial_res.append(np.argmax(probs.cpu().detach().numpy(), axis=1))
-                adversarial_losses.append(F.cross_entropy(adv_res, y_adv, reduction='sum'))
+                adversarial_losses.append(F.cross_entropy(adv_res, y_adv, reduction='elementwise_mean'))
 
             adversarial_loss_sum = adversarial_losses[0]
             if self._adv_count > 1:
                 for i in range(1, self._adv_count):
                     adversarial_loss_sum += adversarial_losses[i]
-
             total_loss = task_loss + adversarial_loss_sum
         else:
             total_loss = task_loss
@@ -158,7 +157,7 @@ class AdvNN(nn.Module):
         sen = self.encode_sentence(sentence, lengths, hidden, train=train)
         adv_res = self.adv_mlp(sen, 0, train, 0)
         adv_probs = F.softmax(adv_res, dim=1)
-        adv_loss = F.cross_entropy(adv_res, y_adv, reduction='sum')
+        adv_loss = F.cross_entropy(adv_res, y_adv, reduction='elementwise_mean')
         return adv_loss, np.argmax((adv_probs.cpu().detach().numpy()), axis=1)
 
     #def save(self, f_name):

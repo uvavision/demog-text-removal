@@ -8,7 +8,7 @@ Usage:
 
 Options:
   -h --help                     show this help message and exit
-  --batch_size=NUM              batch size
+  --batch_size=NUM              batch size [default: 32]
   --lr=LEARNING                 learning rate [default: 0.01]
   --epochs=EPOCHS               amount of training epochs [default: 100]
   --ro=RO                       amount of power to the adversarial
@@ -90,7 +90,7 @@ def epoch_pass(data_loader, model, optimizer, training, ro, vec_drop, logger, pr
         adv_truth += data[2].numpy().tolist()
 
         t_loss += loss.item()
-        n_processed += len(data)
+        n_processed += 1
 
         if training:
             # backpropogate
@@ -182,7 +182,7 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, task_type, \
             adv_preds += adv_pred.tolist()
             adv_truth += data[task_type].numpy().tolist()
             t_loss += loss.item()
-            n_processed += len(data)
+            n_processed += 1
 
             # backpropogate
             optimizer.zero_grad()
@@ -203,7 +203,7 @@ def train_task(model, train_loader, dev_loader, optimizer, epochs, task_type, \
             adv_truth += data[task_type].numpy().tolist()
 
             t_loss += loss.item()
-            n_processed += len(data)
+            n_processed += 1
 
         adv_acc = accuracy_score(adv_truth, adv_preds)
         dev_task_acc_arr.append(adv_acc)

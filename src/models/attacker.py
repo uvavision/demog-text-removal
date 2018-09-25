@@ -107,6 +107,7 @@ def train(model, enc_net, train_loader, dev_loader, optimizer, epochs, vec_drop,
     :param print_every: print every x examples in each epoch
     :return:
     """
+
     train_acc_arr, train_loss_arr = [], []
     dev_acc_arr, dev_loss_arr = [], []
     best_model_epoch = 1
